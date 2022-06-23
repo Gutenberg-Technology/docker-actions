@@ -3,10 +3,6 @@ name: Reusable build image
 on:
   workflow_call:
     inputs:
-      ecr-repo:
-        type: string
-        description: "ECR Respoitory"
-        required: true
       image-name:
         type: string
         description: "Image Name"
@@ -30,6 +26,11 @@ on:
         description: "Full path to container-structure-test config file"
         default: ''
         required: false
+      push-image:
+        type: boolean
+        description: "Push the built image"
+        default: false
+        required: false
     secrets:
       aws-access-key-id:
         description: "AWS access key ID"
@@ -39,10 +40,21 @@ on:
         required: true
 
 jobs:
-  build-image:
+  build-test-push-image:
     name: 'Build image'
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.aws-access-key-id }}
+          aws-secret-access-key: ${{ secrets.aws-secret-access-key }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
       - name: Checkout
         uses: actions/checkout@v2
 
@@ -51,13 +63,12 @@ jobs:
           GIT_SHA: ${{ github.sha }}
           DOCKER_BUILDKIT: 1
         run: |
-          docker build \
+          docker build ${{ inputs.build-options }} \
           --pull \
-          --no-cache \ 
-          ${{ build-options }} \
+          --no-cache \
           --file ${{ inputs.working-directory }}/Dockerfile \
-          -t ${{ inputs.ecr-registry }}/${{ inputs.image-name }}:${GIT_SHA:0:7} \
-          -t ${{ inputs.ecr-registry }}/${{ inputs.image-name }}:latest \
+          -t ${{ steps.login-ecr.outputs.registry }}/${{ inputs.image-name }}:${GIT_SHA:0:7} \
+          -t ${{ steps.login-ecr.outputs.registry }}/${{ inputs.image-name }}:latest \
           ${{ inputs.working-directory }}
 
       - name: Run container tests
@@ -69,6 +80,13 @@ jobs:
           && chmod +x container-structure-test-linux-amd64 \
           && mkdir -p $HOME/bin \
           && export PATH=$PATH:$HOME/bin \
-          && mv container-structure-test-linux-amd64 $HOME/bin/container-structure-test\
-          && container-structure-test test -c ${{ inputs.test-image-config }} -i ${{ inputs.ecr-registry }}/${{ inputs.image-name }}:latest
-          && container-structure-test test -c ${{ inputs.test-image-config }} -i ${{ inputs.ecr-registry }}/${{ inputs.image-name }}:${GIT_SHA:0:7}
+          && mv container-structure-test-linux-amd64 $HOME/bin/container-structure-test \
+          && container-structure-test test -c ${{ inputs.test-image-config }} -i ${{ steps.login-ecr.outputs.registry }}/${{ inputs.image-name }}:latest \
+          && container-structure-test test -c ${{ inputs.test-image-config }} -i ${{ steps.login-ecr.outputs.registry }}/${{ inputs.image-name }}:${GIT_SHA:0:7}
+
+      - name: Push image on Amazon ECR
+        if: inputs.push-image == true
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          docker push --all-tags ${{ steps.login-ecr.outputs.registry }}/${{ inputs.image-name }}
